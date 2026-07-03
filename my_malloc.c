@@ -27,6 +27,8 @@ int my_malloc_init();
 
 int my_free(uint64_t *block);
 
+void check_heap();
+
 uint64_t *my_malloc(size_t payload_size) {
   size_t min_size_before_alignment = 16 + payload_size; // total block size -- (header + footer -- 8 bytes each) + payload
 
@@ -230,8 +232,8 @@ int my_free(uint64_t *block) {
   uint64_t *block_hdr = block - 1;
   uint64_t *block_footer = block_hdr + ((get_block_size(block_hdr) / 8)  - 1); 
 
-  is_prev_block_free = *(block_hdr - 1) & 0x1;
-  is_next_block_free = *(block_footer + 1) & 0x1;
+  is_prev_block_free = (*(block_hdr - 1) & 0x1) == 0;
+  is_next_block_free = (*(block_footer + 1) & 0x1) == 0;
 
   size_t prev_block_size = *(block_hdr - 1) >> 4;
   size_t next_block_size = *(block_footer + 1) >> 4;
@@ -257,7 +259,7 @@ int my_free(uint64_t *block) {
     new_size = block_size + next_block_size;
     assert(((new_size & 15) == 0) && "expected new block size (block + next) to be 16 bytes aligned");
   }
-  
+
   // free from existing chunk
   // mark as free
   *block_hdr = 0x0;
@@ -269,16 +271,57 @@ int my_free(uint64_t *block) {
   return 0;
 }
 
+void check_heap() {
+  // prologue is always allocated and the size is correct
+  assert((get_block_size(prologue_hdr) == 16)
+              && "expected prologue size to be 16 bytes");
+  assert((get_block_size(prologue_hdr) == get_block_size(prologue_hdr + 1))
+              && "expected size stored in prologue header to be the same as size stored in prologue footer");
+  assert((is_allocated_block(prologue_hdr) == 1) && "expected prologue header to be allocated");
+  assert(is_allocated_block(prologue_hdr + 1) == 1 && "expected prologue footer to be allocated");
+  assert((((uintptr_t)prologue_hdr & 7) == 0) && "expected prologue header address to be 8 bytes aligned");
+
+  uint64_t *current_block = prologue_hdr + 2;
+
+  while (still_in_heap(current_block)) {
+    // payload starts on a 16 byte aligned address
+    assert((((uintptr_t)(current_block + 1) & 15) == 0) && "expected payload address to be 16 bytes aligned");
+      
+    // every block size is a factor of 16
+    assert(((get_block_size(current_block) & 15) == 0) && "expected block size to be a multiple of 16");
+
+    // every block has the same metadata (size and allocated bit) in the header and footer
+    uint64_t *current_block_footer = current_block + ((get_block_size(current_block) / 8) - 1); 
+    assert(get_block_size(current_block) == get_block_size(current_block_footer)
+              && "expected size stored in block header to be the same as size stored in footer");
+    assert(is_allocated_block(current_block) == is_allocated_block(current_block_footer)
+              && "expected allocated bit stored in block header to be the same as allocated bit stored in footer");
+
+    // TODO: Check no block overlaps (not sure how to implement this or if it makes sense to even try, 
+    // I need to think of it)
+    
+    current_block = current_block_footer + 1;
+  }
+
+  // epilogue is allocated and the size is 0
+  assert(get_block_size(current_block) == 0 && "expected block to be the epilogue and block size to be 0");
+  assert(is_allocated_block(current_block) == 1 && "expected epilogue block to be allocated");
+}
+
 int main(int argc, char *argv[]) {
   printf("Initialising my custom allocator (pre-allocates 2MB)\n");
 
   if(my_malloc_init() != 0) return 1;
 
+  check_heap();
+  printf("checked heap after heap initialization, heap is valid\n\n");
+
   printf("Allocating 12 bytes for use\n");
   char *hello_addr = (char *) my_malloc(12);
   if (hello_addr == NULL) return 1;
 
-  assert((((uintptr_t)hello_addr & 15) == 0) && "expected user payload to start at a 16 byte aligned address");
+  check_heap();
+  printf("checked heap after allocation, heap is valid\n\n");
 
   printf("Copying string into allocated address\n"); 
   strcpy(hello_addr, "Hello world!");
@@ -287,6 +330,9 @@ int main(int argc, char *argv[]) {
 
   printf("Freeing memory\n");
   if(my_free((uint64_t *) hello_addr) != 0) return 1;
+
+  check_heap();
+  printf("checked heap after freeing, heap is valid\n\n");
 
   printf("Done\n");
   return 0;
