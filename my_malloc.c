@@ -3,6 +3,9 @@
 #include <string.h>
 #include <stdint.h>
 
+#include <time.h>
+#include <stdlib.h>
+
 #include <assert.h>
 
 static char *my_addr;
@@ -25,7 +28,7 @@ int is_allocated_block(uint64_t *block);
 
 int my_malloc_init();
 
-int my_free(uint64_t *block);
+int my_free(uint64_t *payload_address);
 
 void check_heap();
 
@@ -222,14 +225,14 @@ int my_malloc_init() {
   return 0;
 }
 
-int my_free(uint64_t *block) {
+int my_free(uint64_t *payload_address) {
   int is_prev_block_free;
   int is_next_block_free;
 
-  assert((((uintptr_t)block & 15) == 0) && "expected payload block address to be 16 bytes aligned");
+  assert((((uintptr_t)payload_address & 15) == 0) && "expected payload block address to be 16 bytes aligned");
 
   // assuming user sends address of first payload
-  uint64_t *block_hdr = block - 1;
+  uint64_t *block_hdr = payload_address - 1;
   uint64_t *block_footer = block_hdr + ((get_block_size(block_hdr) / 8)  - 1); 
 
   is_prev_block_free = (*(block_hdr - 1) & 0x1) == 0;
@@ -239,34 +242,32 @@ int my_free(uint64_t *block) {
   size_t next_block_size = *(block_footer + 1) >> 4;
   size_t block_size = *block_hdr >> 4;
 
-  size_t new_size;
-
   if (is_prev_block_free && is_next_block_free) {
     block_hdr = block_hdr - (prev_block_size / 8);
     block_footer = block_footer + (next_block_size / 8);
 
-    new_size = prev_block_size + block_size + next_block_size;
+    block_size = prev_block_size + block_size + next_block_size;
     // I would expect the new size to still be 16 bytes aligned
-    assert(((new_size & 15) == 0) && "expected new block size (prev + block + next) to be 16 bytes aligned");
+    assert(((block_size & 15) == 0) && "expected new block size (prev + block + next) to be 16 bytes aligned");
   } else if (is_prev_block_free) {
     block_hdr = block_hdr - (prev_block_size / 8);
 
-    new_size = prev_block_size + block_size;
-    assert(((new_size & 15) == 0) && "expected new block size (prev + block) to be 16 bytes aligned");
+    block_size = prev_block_size + block_size;
+    assert(((block_size & 15) == 0) && "expected new block size (prev + block) to be 16 bytes aligned");
   } else if (is_next_block_free) {
     block_footer = block_footer + (next_block_size / 8);
 
-    new_size = block_size + next_block_size;
-    assert(((new_size & 15) == 0) && "expected new block size (block + next) to be 16 bytes aligned");
+    block_size = block_size + next_block_size;
+    assert(((block_size & 15) == 0) && "expected new block size (block + next) to be 16 bytes aligned");
   }
 
   // free from existing chunk
   // mark as free
   *block_hdr = 0x0;
-  *block_hdr |= (new_size << 4);
+  *block_hdr |= (block_size << 4);
 
   *block_footer = 0x0;
-  *block_footer |= (new_size << 4);
+  *block_footer |= (block_size << 4);
 
   return 0;
 }
@@ -308,32 +309,77 @@ void check_heap() {
   assert(is_allocated_block(current_block) == 1 && "expected epilogue block to be allocated");
 }
 
+int harness() {
+  // list of malloc addresses - [m_1, m_2, m_3, m_4]
+
+  // malloc_counter starts at 0
+  // max_malloc_count = 100 to start with?
+
+  // random op each loop -> malloc or free
+
+  // when random picked malloc
+  // so malloc a random size
+  // increment malloc_counter
+
+  // or
+  // random picked free
+  // so free a random payload address from a list of payload adresses
+  // decrement malloc_counter
+  
+  const int max_malloc_count = 100;
+  int malloc_counter = 0;
+
+  uint64_t *payloads[max_malloc_count];
+  memset(payloads, 0, sizeof(payloads));
+
+  srand(time(NULL));
+
+  my_malloc_init();
+  do {
+    int malloc_or_free = rand() % 2;
+
+    if (malloc_or_free == 1) { 
+      // malloc
+      size_t random_size = (size_t)((rand() % 2048) + 1);
+
+      uint64_t *payload_address = my_malloc(random_size);
+      size_t allocated_size = get_block_size(payload_address - 1);
+
+      if (payload_address == NULL) {
+        printf("failed to allocate size %zu bytes\n", random_size);
+        return 1;
+      } else {
+        printf("requested size %zu bytes, allocated %zu bytes\n", random_size, allocated_size);
+        payloads[malloc_counter] = payload_address;
+        malloc_counter += 1;
+      }
+    } else {
+      // free
+      int payload_to_free = rand() % max_malloc_count;
+      uint64_t *payload_address_to_free = payloads[payload_to_free];
+      if (payload_address_to_free != NULL) {
+        size_t payload_size = get_block_size(payload_address_to_free - 1);
+        if (my_free(payload_address_to_free) != 0) {
+          printf("failed to free size %zu bytes at address %p\n", payload_size, (void*)payload_address_to_free);
+          return 1;
+        } else {
+          printf("freed %zu bytes at address %p\n", payload_size, (void*)payload_address_to_free);
+          payloads[payload_to_free] = NULL;
+        }
+      } else {
+        printf("no address to free\n");
+      }
+    }
+
+    check_heap();
+  } while (malloc_counter < max_malloc_count);
+
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
-  printf("Initialising my custom allocator (pre-allocates 2MB)\n");
 
-  if(my_malloc_init() != 0) return 1;
+  harness();
 
-  check_heap();
-  printf("checked heap after heap initialization, heap is valid\n\n");
-
-  printf("Allocating 12 bytes for use\n");
-  char *hello_addr = (char *) my_malloc(12);
-  if (hello_addr == NULL) return 1;
-
-  check_heap();
-  printf("checked heap after allocation, heap is valid\n\n");
-
-  printf("Copying string into allocated address\n"); 
-  strcpy(hello_addr, "Hello world!");
-
-  printf("Prints: %s\n", hello_addr);
-
-  printf("Freeing memory\n");
-  if(my_free((uint64_t *) hello_addr) != 0) return 1;
-
-  check_heap();
-  printf("checked heap after freeing, heap is valid\n\n");
-
-  printf("Done\n");
   return 0;
 }
