@@ -2,10 +2,8 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <stdint.h>
-
 #include <time.h>
 #include <stdlib.h>
-
 #include <assert.h>
 
 static char *my_addr;
@@ -19,18 +17,22 @@ static uint64_t *epilogue_hdr;
 
 uint64_t *get_free_block(size_t requested_block_size);
 uint64_t *get_free_block_and_coalesce(uint64_t *free_block, size_t requested_size);
-
 uint64_t *my_malloc(size_t payload_size);
-
-int get_block_size(uint64_t *block_hdr_or_footer);
+size_t get_block_size(uint64_t *block_hdr_or_footer);
 int still_in_heap(uint64_t *block_hdr);
 int is_allocated_block(uint64_t *block);
-
 int my_malloc_init();
-
 int my_free(uint64_t *payload_address);
-
 void check_heap();
+int compare_nanoseconds_asc(const void *a, const void *b);
+
+
+int compare_nanoseconds_asc(const void *a, const void *b) {
+  uint64_t time1 = *(const uint64_t *)a;
+  uint64_t time2 = *(const uint64_t *)b;
+
+  return (time1 > time2) - (time1 < time2); 
+}
 
 uint64_t *my_malloc(size_t payload_size) {
   size_t min_size_before_alignment = 16 + payload_size; // total block size -- (header + footer -- 8 bytes each) + payload
@@ -144,7 +146,7 @@ uint64_t *get_free_block_and_coalesce(uint64_t *free_block, size_t requested_siz
   }
 }
 
-int get_block_size(uint64_t *block_hdr_or_footer) {
+size_t get_block_size(uint64_t *block_hdr_or_footer) {
   return *block_hdr_or_footer >> 4;
 }
 
@@ -325,16 +327,35 @@ int harness() {
   // random picked free
   // so free a random payload address from a list of payload adresses
   // decrement malloc_counter
+
+  struct timespec start, end;
   
   const int max_malloc_count = 100;
   int malloc_counter = 0;
+  int free_counter = 0;
 
   uint64_t *payloads[max_malloc_count];
   memset(payloads, 0, sizeof(payloads));
 
+  uint64_t *malloc_payloads[max_malloc_count];
+  memset(malloc_payloads, 0, sizeof(malloc_payloads));
+
+  uint64_t my_malloc_latencies[max_malloc_count];
+  uint64_t my_free_latencies[max_malloc_count];
+
+  uint64_t malloc_latencies[max_malloc_count];
+  uint64_t free_latencies[max_malloc_count];
+
+  memset(my_malloc_latencies, 0, sizeof(my_malloc_latencies));
+  memset(my_free_latencies, 0, sizeof(my_free_latencies));
+
+  memset(malloc_latencies, 0, sizeof(malloc_latencies));
+  memset(free_latencies, 0, sizeof(free_latencies));
+  
   srand(time(NULL));
 
   my_malloc_init();
+  
   do {
     int malloc_or_free = rand() % 2;
 
@@ -342,29 +363,71 @@ int harness() {
       // malloc
       size_t random_size = (size_t)((rand() % 2048) + 1);
 
+      clock_gettime(CLOCK_MONOTONIC, &start);
       uint64_t *payload_address = my_malloc(random_size);
-      size_t allocated_size = get_block_size(payload_address - 1);
+      clock_gettime(CLOCK_MONOTONIC, &end);
+
+      uint64_t my_delta_ns = (((uint64_t)end.tv_sec * 1000000000ULL) + (uint64_t)end.tv_nsec) - 
+                            (((uint64_t)start.tv_sec * 1000000000ULL) + (uint64_t)start.tv_nsec);
+
+      clock_gettime(CLOCK_MONOTONIC, &start);
+      uint64_t *malloc_payload_address = (uint64_t*) malloc(random_size);
+      clock_gettime(CLOCK_MONOTONIC, &end);
+
+      uint64_t delta_ns = (((uint64_t)end.tv_sec * 1000000000ULL) + (uint64_t)end.tv_nsec) - 
+                            (((uint64_t)start.tv_sec * 1000000000ULL) + (uint64_t)start.tv_nsec);
 
       if (payload_address == NULL) {
         printf("failed to allocate size %zu bytes\n", random_size);
         return 1;
       } else {
+        size_t allocated_size = get_block_size(payload_address - 1);
         printf("requested size %zu bytes, allocated %zu bytes\n", random_size, allocated_size);
         payloads[malloc_counter] = payload_address;
+        my_malloc_latencies[malloc_counter] = my_delta_ns;  
+        
+        if (malloc_payload_address != NULL) {
+          malloc_payloads[malloc_counter] = malloc_payload_address; 
+          malloc_latencies[malloc_counter] = delta_ns;
+        }
+
         malloc_counter += 1;
       }
     } else {
       // free
       int payload_to_free = rand() % max_malloc_count;
       uint64_t *payload_address_to_free = payloads[payload_to_free];
+      uint64_t *payload_address_to_free_from_real_free = malloc_payloads[payload_to_free];
+      
       if (payload_address_to_free != NULL) {
         size_t payload_size = get_block_size(payload_address_to_free - 1);
-        if (my_free(payload_address_to_free) != 0) {
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        int is_free = my_free(payload_address_to_free);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        uint64_t my_delta_ns = (((uint64_t)end.tv_sec * 1000000000ULL) + (uint64_t)end.tv_nsec) - 
+                              (((uint64_t)start.tv_sec * 1000000000ULL) + (uint64_t)start.tv_nsec);
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        free(payload_address_to_free_from_real_free);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        uint64_t delta_ns = (((uint64_t)end.tv_sec * 1000000000ULL) + (uint64_t)end.tv_nsec) - 
+                              (((uint64_t)start.tv_sec * 1000000000ULL) + (uint64_t)start.tv_nsec);
+
+        if (is_free != 0) {
           printf("failed to free size %zu bytes at address %p\n", payload_size, (void*)payload_address_to_free);
           return 1;
         } else {
           printf("freed %zu bytes at address %p\n", payload_size, (void*)payload_address_to_free);
           payloads[payload_to_free] = NULL;
+          my_free_latencies[free_counter] = my_delta_ns;
+
+          malloc_payloads[payload_to_free] = NULL;
+          free_latencies[free_counter] = delta_ns;
+          
+          free_counter += 1;
         }
       } else {
         printf("no address to free\n");
@@ -374,6 +437,79 @@ int harness() {
     check_heap();
   } while (malloc_counter < max_malloc_count);
 
+  qsort(my_malloc_latencies, max_malloc_count, sizeof(uint64_t), compare_nanoseconds_asc);
+  qsort(malloc_latencies, max_malloc_count, sizeof(uint64_t), compare_nanoseconds_asc);
+
+  qsort(my_free_latencies, free_counter, sizeof(uint64_t), compare_nanoseconds_asc);
+  qsort(free_latencies, free_counter, sizeof(uint64_t), compare_nanoseconds_asc);
+
+  uint64_t total_my_malloc_latency = 0;
+  uint64_t total_malloc_latency = 0;
+
+  uint64_t total_my_free_latency = 0;
+  uint64_t total_free_latency = 0;
+
+  for (int i = 0; i < malloc_counter; ++i) {
+    total_my_malloc_latency += my_malloc_latencies[i];
+    total_malloc_latency += malloc_latencies[i];
+  }
+
+  for (int i = 0; i < malloc_counter; ++i) {
+    total_my_free_latency += my_free_latencies[i];
+    total_free_latency += free_latencies[i];
+  }
+
+  const double NS_PER_SEC = 1000000000.0;
+
+  double total_my_malloc_latency_seconds = (double)total_my_malloc_latency / NS_PER_SEC;
+  double total_malloc_latency_seconds = (double)total_malloc_latency / NS_PER_SEC;
+
+  double total_my_free_latency_seconds = (double)total_my_free_latency / NS_PER_SEC;
+  double total_free_latency_seconds = (double)total_free_latency / NS_PER_SEC;
+
+  uint64_t my_malloc_throughput = (uint64_t)((double)malloc_counter / total_my_malloc_latency_seconds);
+  uint64_t malloc_throughput = (uint64_t)((double)malloc_counter / total_malloc_latency_seconds);
+
+  uint64_t my_free_throughput = (uint64_t)((double)free_counter / total_my_free_latency_seconds);
+  uint64_t free_throughput = (uint64_t)((double)free_counter / total_free_latency_seconds);
+
+  // interestingly here i learnt about rounding up using Integer arithmetic
+  // Which is way faster than using something like .ceil due to float conversion and from math.h
+  // formula for integer roundup is 
+  //              Ceiling (A/B) = A + B - 1
+  //                             -----------
+  //                                  B
+  // formula for getting the index from the percentile is basically
+  // p50, ... p90, ... p_x
+  // p50_index =  ceiling(n * 0.5) - 1
+  // p90_index = ceiling(n * 0.99) - 1
+  //
+  // so for p50 -> 0.5 -> 1/2 -> ceiling(A/B) -> integer arithmetic folumar above for ceiling
+  int malloc_p50_index = ((max_malloc_count + 1) / 2) - 1;
+  int malloc_p99_index = ((((max_malloc_count * 99) + 99) / 100)) - 1;
+
+  int free_p50_index = ((free_counter + 1) / 2) - 1;
+  int free_p99_index = ((((free_counter * 99) + 99) / 100)) - 1;
+
+  printf("\n====== Malloc ======\n");
+  printf("[Throughput] my_malloc: %lldops/s\n", my_malloc_throughput);
+  printf("[Throughput] malloc:    %lldops/s\n\n",    malloc_throughput);
+
+  printf("[p99] my_malloc: %lldns\n", my_malloc_latencies[malloc_p99_index]);
+  printf("[p99] malloc:    %lldns\n\n", malloc_latencies[malloc_p99_index]);
+
+  printf("[p50] my_malloc: %lldns\n", my_malloc_latencies[malloc_p50_index]);
+  printf("[p50] malloc:    %lldns\n\n",    malloc_latencies[malloc_p50_index]);
+  
+  printf("====== Free ======\n");
+  printf("[Throughput] my_free: %lldops/s\n", my_free_throughput);
+  printf("[Throughput] free:    %lldops/s\n\n",    free_throughput);
+
+  printf("[p99] my_free: %lldns\n", my_free_latencies[free_p99_index]);
+  printf("[p99] free:    %lldns\n\n",    free_latencies[free_p99_index]);
+
+  printf("[p50] my_free: %lldns\n", my_free_latencies[free_p50_index]);
+  printf("[p50] free:    %lldns\n\n", free_latencies[free_p50_index]);
   return 0;
 }
 
